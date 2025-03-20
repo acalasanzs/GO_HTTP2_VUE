@@ -1,0 +1,202 @@
+package main
+
+import (
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/rs/cors"
+)
+
+// Todo represents a todo item
+type Todo struct {
+	ID          int       `json:"id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	Completed   bool      `json:"completed"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// TodoStore is our in-memory database
+type TodoStore struct {
+	mutex  sync.RWMutex
+	todos  map[int]Todo
+	nextID int
+}
+
+// NewTodoStore creates a new todo store
+func NewTodoStore() *TodoStore {
+	return &TodoStore{
+		todos:  make(map[int]Todo),
+		nextID: 1,
+	}
+}
+
+// Global store
+var store = NewTodoStore()
+
+func main() {
+	r := mux.NewRouter()
+
+	// Routes
+	r.HandleFunc("/api/todos", GetTodos).Methods("GET")
+	r.HandleFunc("/api/todos", CreateTodo).Methods("POST")
+	r.HandleFunc("/api/todos/{id}", GetTodo).Methods("GET")
+	r.HandleFunc("/api/todos/{id}", UpdateTodo).Methods("PUT")
+	r.HandleFunc("/api/todos/{id}", DeleteTodo).Methods("DELETE")
+
+	// Add CORS middleware
+	c := cors.New(cors.Options{
+		AllowedOrigins: []string{"https://localhost:5173"}, // Vue dev server with HTTPS
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE"},
+		AllowedHeaders: []string{"Content-Type"},
+	})
+	handler := c.Handler(r)
+
+	// Create server with TLS
+	srv := &http.Server{
+		Addr:    ":8443",
+		Handler: handler,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+
+	// Generate self-signed certificates for development with:
+	// go run $(go env GOROOT)/src/crypto/tls/generate_cert.go --host localhost
+
+	// Start HTTP/2 server
+	fmt.Println("Server is running on https://localhost:8443")
+	fmt.Println("HTTP/2 is enabled by default with TLS")
+	log.Fatal(srv.ListenAndServeTLS("cert.pem", "key.pem"))
+}
+
+// GetTodos returns all todos
+func GetTodos(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("Protocol used: %s\n", r.Proto)
+	
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+
+	todos := make([]Todo, 0, len(store.todos))
+	for _, todo := range store.todos {
+		todos = append(todos, todo)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(todos)
+}
+
+// GetTodo returns a single todo
+func GetTodo(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("Protocol used: %s\n", r.Proto)
+	
+	params := mux.Vars(r)
+	id, err := strconv.Atoi(params["id"])
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+
+	todo, ok := store.todos[id]
+	if !ok {
+		http.Error(w, "Todo not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(todo)
+}
+
+// CreateTodo creates a new todo
+func CreateTodo(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("Protocol used: %s\n", r.Proto)
+	
+	var todo Todo
+	if err := json.NewDecoder(r.Body).Decode(&todo); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	todo.ID = store.nextID
+	store.nextID++
+	todo.CreatedAt = time.Now()
+	todo.Completed = false
+
+	store.todos[todo.ID] = todo
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(todo)
+}
+
+// UpdateTodo updates an existing todo
+func UpdateTodo(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("Protocol used: %s\n", r.Proto)
+	
+	params := mux.Vars(r)
+	id, err := strconv.Atoi(params["id"])
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	var updatedTodo Todo
+	if err := json.NewDecoder(r.Body).Decode(&updatedTodo); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	existingTodo, ok := store.todos[id]
+	if !ok {
+		http.Error(w, "Todo not found", http.StatusNotFound)
+		return
+	}
+
+	// Update fields but keep ID and creation time
+	updatedTodo.ID = existingTodo.ID
+	updatedTodo.CreatedAt = existingTodo.CreatedAt
+	
+	store.todos[id] = updatedTodo
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updatedTodo)
+}
+
+// DeleteTodo deletes a todo
+func DeleteTodo(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("Protocol used: %s\n", r.Proto)
+	
+	params := mux.Vars(r)
+	id, err := strconv.Atoi(params["id"])
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	if _, ok := store.todos[id]; !ok {
+		http.Error(w, "Todo not found", http.StatusNotFound)
+		return
+	}
+
+	delete(store.todos, id)
+	w.WriteHeader(http.StatusNoContent)
+}
