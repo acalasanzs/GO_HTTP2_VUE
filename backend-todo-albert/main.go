@@ -1,44 +1,89 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
+	"math/rand"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 	"github.com/rs/cors"
 )
 
+var (
+	items     = []Item{}
+	itemsLock sync.RWMutex
+	nameGen   *NameGenerator
+)
+
+type NameGenerator struct {
+	adjectives []string
+	nouns      []string
+	rng        *rand.Rand
+}
+
+// Item represents a simple data item
+type Item struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Generate randomly selects an adjective and noun and combines them.
+func (ng *NameGenerator) Generate() string {
+	adjective := ng.adjectives[ng.rng.Intn(len(ng.adjectives))]
+	noun := ng.nouns[ng.rng.Intn(len(ng.nouns))]
+	return adjective + " " + noun
+}
 func main() {
-	// Create a new Gorilla mux router.
+	godotenv.Load()
 	r := mux.NewRouter()
 
-	// API endpoint that returns a JSON list of todos.
-	r.HandleFunc("/api/todos", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Sample todo items.
-		w.Write([]byte(`[{"id":1,"task":"Buy groceries","completed":false},
-		                  {"id":2,"task":"Walk the dog","completed":true},
-		                  {"id":3,"task":"Read a book","completed":false}]`))
-	}).Methods("GET")
+	// API routes
+	r.HandleFunc("/api/items", getItems).Methods("GET")
+	r.HandleFunc("/api/items", createItem).Methods("POST")
+	r.HandleFunc("/api/items/{id}", getItem).Methods("GET")
 
-	// Serve static files (the Vue app) from the "public" directory.
-	fs := http.FileServer(http.Dir("./public"))
-	r.PathPrefix("/").Handler(fs)
-
-	// Configure CORS to allow all origins and common methods.
+	// Setup CORS
 	c := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedOrigins:   []string{"http://localhost:5173"}, // Vue.js dev server address
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowCredentials: true,
 	})
 
-	// Wrap the router with the CORS handler.
+	// Start server
 	handler := c.Handler(r)
+	log.Println("Go server running on http://localhost:3000")
+	log.Fatal(http.ListenAndServe(":3000", handler))
+}
 
-	// Start the HTTPS server on port 8443.
-	// HTTP/2 is automatically enabled when using TLS.
-	log.Println("Starting server on https://localhost:8443")
-	err := http.ListenAndServeTLS(":8443", "server.crt", "server.key", handler)
-	if err != nil {
-		log.Fatalf("Error starting server: %v", err)
+func getItems(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(items)
+}
+
+func getItem(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	params := mux.Vars(r)
+
+	for _, item := range items {
+		if item.ID == params["id"] {
+			json.NewEncoder(w).Encode(item)
+			return
+		}
 	}
+
+	w.WriteHeader(http.StatusNotFound)
+	json.NewEncoder(w).Encode(map[string]string{"error": "Item not found"})
+}
+
+func createItem(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var item Item
+	_ = json.NewDecoder(r.Body).Decode(&item)
+
+	items = append(items, item)
+	json.NewEncoder(w).Encode(item)
 }
